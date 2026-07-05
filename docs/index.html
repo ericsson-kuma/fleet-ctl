@@ -1,0 +1,332 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleet-ctl — staged rollout timeline</title>
+<style>
+  :root {
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --axis:      #c3c2b7;
+    --border:    rgba(11,11,11,0.10);
+    --wave-a:    #86b6ef;  /* ordinal blue 250 */
+    --wave-b:    #2a78d6;  /* 450 */
+    --wave-c:    #104281;  /* 650 */
+    --good:      #0ca30c;
+    --good-text: #006300;
+    --serious:   #ec835a;
+    --critical:  #d03b3b;
+    --code-bg:   #f4f3f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --grid:      #2c2c2a;
+      --axis:      #383835;
+      --border:    rgba(255,255,255,0.10);
+      --wave-a:    #6da7ec;  /* ordinal blue 300 */
+      --wave-b:    #2a78d6;  /* 450 */
+      --wave-c:    #184f95;  /* 600 */
+      --good:      #0ca30c;
+      --good-text: #0ca30c;
+      --serious:   #ec835a;
+      --critical:  #d03b3b;
+      --code-bg:   #141413;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 40px 20px 80px;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 26px; letter-spacing: -0.01em; }
+  h1 code { font: inherit; }
+  .tagline { color: var(--ink-2); margin-top: 6px; max-width: 640px; }
+  .tagline a { color: inherit; }
+  h2 { font-size: 17px; margin: 40px 0 4px; }
+  .sub { color: var(--ink-2); font-size: 13.5px; margin-bottom: 12px; }
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 16px; min-width: 150px; flex: 1;
+  }
+  .tile .v { font-size: 24px; font-weight: 650; }
+  .tile .k { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px;
+  }
+  .scroller { overflow-x: auto; }
+  svg { display: block; }
+  svg text { font: 12px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .rowlab   { fill: var(--ink-2); }
+  .rowlab b { font-weight: 600; }
+  .ticklab  { fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .notelab  { fill: var(--ink-2); }
+  .goodlab  { fill: var(--good-text); font-weight: 600; }
+  .critlab  { fill: var(--critical); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px;
+            font-size: 12.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .sw.line { width: 3px; height: 12px; border-radius: 1.5px; }
+  pre.log {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto;
+    font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink-2);
+  }
+  pre.log .ok   { color: var(--good-text); }
+  pre.log .bad  { color: var(--critical); font-weight: 600; }
+  pre.log .kind { color: var(--ink); }
+  #tip {
+    position: fixed; display: none; pointer-events: none; z-index: 10;
+    background: var(--ink); color: var(--page);
+    font-size: 12px; line-height: 1.4; padding: 6px 9px; border-radius: 6px;
+    max-width: 300px;
+  }
+  footer { margin-top: 48px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--ink-2); }
+</style>
+
+<div class="wrap">
+  <h1><code>fleet-ctl</code> — staged rollout, visualized</h1>
+  <p class="tagline">
+    One run of <a href="https://github.com/ericsson-kuma/fleet-ctl"><code>make demo</code></a>:
+    a Go + gRPC control plane pushes two config versions to 20 devices.
+    The good one promotes wave by wave; the bad one is caught by the
+    guardrail and rolled back before it can reach the fleet.
+  </p>
+
+  <div class="tiles">
+    <div class="tile"><div class="v">20</div><div class="k">devices in the fleet</div></div>
+    <div class="tile"><div class="v">5% → 25% → 100%</div><div class="k">canary waves per rollout</div></div>
+    <div class="tile"><div class="v">20%</div><div class="k">failure budget per wave</div></div>
+    <div class="tile"><div class="v">15 / 20</div><div class="k">devices never exposed to the bad config</div></div>
+  </div>
+
+  <h2>Phase 1 — good config v2 reaches the whole fleet</h2>
+  <p class="sub">Each wave assigns v2 to its slice, soaks for a 2s health window, and is
+     promoted only after staying inside the failure budget. Hover the marks.</p>
+  <div class="card"><div class="scroller">
+  <svg width="920" height="196" viewBox="0 0 920 196" role="img"
+       aria-label="Phase 1 timeline: waves 0, 1, 2 promoted in sequence; rollout succeeded at 6 seconds.">
+    <g id="p1grid"></g>
+    <!-- rows: y centers 44 / 84 / 124 -->
+    <g id="p1bars"></g>
+    <line x1="175" y1="150" x2="900" y2="150" stroke="var(--axis)" stroke-width="1"/>
+    <g id="p1ticks"></g>
+    <text class="goodlab" x="900" y="178" text-anchor="end">SUCCEEDED — v2 is fleet baseline</text>
+  </svg>
+  </div>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--wave-a)"></span>wave 0 · 5% · 1 device</span>
+    <span><span class="sw" style="background:var(--wave-b)"></span>wave 1 · 25% · +4 devices</span>
+    <span><span class="sw" style="background:var(--wave-c)"></span>wave 2 · 100% · +15 devices</span>
+    <span><span class="sw line" style="background:var(--good)"></span>device ack ok</span>
+    <span><span class="sw" style="background:var(--good);border-radius:50%"></span>wave promoted</span>
+  </div></div>
+
+  <h2>Phase 2 — bad config v3 halted at the 25% wave</h2>
+  <p class="sub">The 5% canary happens to pass. In the 25% wave, dev-03 rejects v3:
+     1 failure / 4 devices = 25% &gt; 20% budget — the guardrail halts the rollout and
+     reverts the 5 touched devices to v2. Wave 2 never starts.</p>
+  <div class="card"><div class="scroller">
+  <svg width="920" height="196" viewBox="0 0 920 196" role="img"
+       aria-label="Phase 2 timeline: wave 0 promoted, wave 1 halted on a device failure, rollout rolled back; wave 2 never started.">
+    <g id="p2grid"></g>
+    <g id="p2bars"></g>
+    <line x1="175" y1="150" x2="900" y2="150" stroke="var(--axis)" stroke-width="1"/>
+    <g id="p2ticks"></g>
+  </svg>
+  </div>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--wave-a)"></span>wave 0 · 5%</span>
+    <span><span class="sw" style="background:var(--wave-b)"></span>wave 1 · 25%</span>
+    <span><span class="sw" style="border:1px dashed var(--muted)"></span>wave 2 · never started</span>
+    <span><span class="sw line" style="background:var(--good)"></span>ack ok</span>
+    <span><span class="sw line" style="background:var(--serious)"></span>✕ ack failed</span>
+    <span><span class="sw line" style="background:var(--critical)"></span>halt + rollback</span>
+  </div></div>
+
+  <h2>The event log behind the picture</h2>
+  <p class="sub">Verbatim <code>fleetctl rollout -watch</code> output (times relative to rollout creation).</p>
+  <pre class="log" id="lognode"></pre>
+
+  <footer>
+    Generated from a real <code>make demo</code> run —
+    <a href="https://github.com/ericsson-kuma/fleet-ctl">github.com/ericsson-kuma/fleet-ctl</a>.
+    Rollout engine: staged waves · health windows · failure budgets · automatic rollback.
+  </footer>
+</div>
+<div id="tip"></div>
+
+<script>
+// ---- geometry ---------------------------------------------------------------
+const X0 = 175, X1 = 900, ROWY = [44, 84, 124], BARH = 20;
+
+function scale(maxS) { return s => X0 + (X1 - X0) * (s / maxS); }
+const el = (n) => document.createElementNS("http://www.w3.org/2000/svg", n);
+
+function grid(gid, maxS, step) {
+  const g = document.getElementById(gid), x = scale(maxS);
+  for (let s = 0; s <= maxS + 1e-9; s += step) {
+    const l = el("line");
+    l.setAttribute("x1", x(s)); l.setAttribute("x2", x(s));
+    l.setAttribute("y1", 18); l.setAttribute("y2", 150);
+    l.setAttribute("stroke", "var(--grid)"); l.setAttribute("stroke-width", "1");
+    g.appendChild(l);
+    const t = el("text");
+    t.setAttribute("class", "ticklab"); t.setAttribute("x", x(s));
+    t.setAttribute("y", 166); t.setAttribute("text-anchor", "middle");
+    t.textContent = s + "s";
+    g.appendChild(t);
+  }
+}
+
+// waves: {row, from, to, color, label, tip, ghost}
+function bars(gid, maxS, waves) {
+  const g = document.getElementById(gid), x = scale(maxS);
+  for (const w of waves) {
+    const y = ROWY[w.row] - BARH / 2;
+    const r = el("rect");
+    r.setAttribute("x", x(w.from)); r.setAttribute("y", y);
+    r.setAttribute("width", Math.max(x(w.to) - x(w.from), 3)); r.setAttribute("height", BARH);
+    r.setAttribute("rx", 4);
+    if (w.ghost) {
+      r.setAttribute("fill", "none");
+      r.setAttribute("stroke", "var(--muted)"); r.setAttribute("stroke-dasharray", "4 4");
+    } else {
+      r.setAttribute("fill", w.color);
+    }
+    r.dataset.tip = w.tip;
+    g.appendChild(r);
+    const t = el("text");
+    t.setAttribute("class", "rowlab"); t.setAttribute("x", X0 - 8);
+    t.setAttribute("y", ROWY[w.row] + 4); t.setAttribute("text-anchor", "end");
+    t.textContent = w.label;
+    g.appendChild(t);
+  }
+}
+
+// events: {row,s,type:ok|fail|promote|succeed|halt, tip, lab}
+function ticks(gid, maxS, events) {
+  const g = document.getElementById(gid), x = scale(maxS);
+  for (const e of events) {
+    const cx = x(e.s), cy = ROWY[e.row];
+    let m;
+    if (e.type === "promote") {
+      m = el("circle");
+      m.setAttribute("cx", cx); m.setAttribute("cy", cy); m.setAttribute("r", 6);
+      m.setAttribute("fill", "var(--good)");
+      m.setAttribute("stroke", "var(--surface)"); m.setAttribute("stroke-width", "2");
+    } else if (e.type === "halt") {
+      m = el("line");
+      m.setAttribute("x1", cx); m.setAttribute("x2", cx);
+      m.setAttribute("y1", 18); m.setAttribute("y2", 150);
+      m.setAttribute("stroke", "var(--critical)"); m.setAttribute("stroke-width", "2");
+    } else { // ok / fail tick on the wave bar
+      m = el("line");
+      m.setAttribute("x1", cx); m.setAttribute("x2", cx);
+      m.setAttribute("y1", cy - 14); m.setAttribute("y2", cy + 14);
+      m.setAttribute("stroke", e.type === "ok" ? "var(--good)" : "var(--serious)");
+      m.setAttribute("stroke-width", e.type === "ok" ? 2 : 3);
+    }
+    m.dataset.tip = e.tip;
+    g.appendChild(m);
+    if (e.lab) {
+      const t = el("text");
+      t.setAttribute("x", cx + (e.dx ?? 10)); t.setAttribute("y", cy + (e.dy ?? -12));
+      t.setAttribute("class", e.type === "fail" || e.type === "halt" ? "critlab" : "goodlab");
+      if (e.anchor) t.setAttribute("text-anchor", e.anchor);
+      t.textContent = e.lab;
+      g.appendChild(t);
+    }
+  }
+}
+
+// ---- phase 1 (0..6.5s), from the demo run ------------------------------------
+grid("p1grid", 6.5, 1);
+bars("p1bars", 6.5, [
+  { row: 0, from: 0.0, to: 2.0, color: "var(--wave-a)", label: "wave 0 · 5% · 1 dev",
+    tip: "wave 0: dev-00 assigned v2 at t=0; healthy through the 2s window" },
+  { row: 1, from: 2.0, to: 4.0, color: "var(--wave-b)", label: "wave 1 · 25% · +4 devs",
+    tip: "wave 1: dev-01..dev-04 assigned v2; 4/4 ok; healthy through the window" },
+  { row: 2, from: 4.0, to: 6.0, color: "var(--wave-c)", label: "wave 2 · 100% · +15 devs",
+    tip: "wave 2: remaining 15 devices assigned v2; 15/15 ok" },
+]);
+ticks("p1ticks", 6.5, [
+  { row: 0, s: 0.38, type: "ok", tip: "dev-00 applied v2 (1/1 ok)" },
+  { row: 0, s: 2.0, type: "promote", tip: "wave 0 healthy for 2s — promoted", lab: "promoted", dy: -14 },
+  { row: 1, s: 2.13, type: "ok", tip: "dev-03 applied v2 (1/4 ok)" },
+  { row: 1, s: 2.18, type: "ok", tip: "dev-01 applied v2 (2/4 ok)" },
+  { row: 1, s: 2.20, type: "ok", tip: "dev-04 applied v2 (3/4 ok)" },
+  { row: 1, s: 2.22, type: "ok", tip: "dev-02 applied v2 (4/4 ok)", lab: "4/4 ok", dy: -18 },
+  { row: 1, s: 4.0, type: "promote", tip: "wave 1 healthy for 2s — promoted", lab: "promoted", dy: -14 },
+  { row: 2, s: 4.21, type: "ok", tip: "15 devices applied v2 between t=4.21s and t=4.31s" },
+  { row: 2, s: 4.24, type: "ok", tip: "15 devices applied v2 between t=4.21s and t=4.31s" },
+  { row: 2, s: 4.27, type: "ok", tip: "15 devices applied v2 between t=4.21s and t=4.31s" },
+  { row: 2, s: 4.31, type: "ok", tip: "15 devices applied v2 between t=4.21s and t=4.31s", lab: "15/15 ok", dy: -18 },
+  { row: 2, s: 6.0, type: "promote", tip: "wave 2 healthy for 2s — rollout SUCCEEDED", lab: "promoted", dy: -14, dx: -8, anchor: "end" },
+]);
+
+// ---- phase 2 (0..3s) ---------------------------------------------------------
+grid("p2grid", 3, 0.5);
+bars("p2bars", 3, [
+  { row: 0, from: 0.0, to: 2.0, color: "var(--wave-a)", label: "wave 0 · 5% · 1 dev",
+    tip: "wave 0: dev-00 assigned v3; the canary happens to be a device that tolerates it" },
+  { row: 1, from: 2.0, to: 2.18, color: "var(--wave-b)", label: "wave 1 · 25% · +4 devs",
+    tip: "wave 1: dev-01..dev-04 assigned v3; dev-03 rejects it 180ms in" },
+  { row: 2, from: 2.18, to: 3.0, ghost: true, label: "wave 2 · never started",
+    tip: "wave 2 never started: 15 devices never exposed to v3" },
+]);
+ticks("p2ticks", 3, [
+  { row: 0, s: 0.38, type: "ok", tip: "dev-00 applied v3 (1/1 ok)" },
+  { row: 0, s: 2.0, type: "promote", tip: "wave 0 healthy for 2s — promoted", lab: "promoted", dy: -14 },
+  { row: 1, s: 2.13, type: "ok", tip: "dev-01 applied v3 (1/4 ok)" },
+  { row: 1, s: 2.15, type: "ok", tip: "dev-02 applied v3 (2/4 ok)" },
+  { row: 1, s: 2.18, type: "fail", tip: "dev-03 failed to apply v3: config rejected by device", lab: "✕ dev-03: 1/4 = 25% > 20% budget", dy: -18, dx: -10, anchor: "end" },
+  { row: 1, s: 2.18, type: "halt",
+    tip: "HALTED: wave 1 failure rate 1/4 exceeds threshold 20%. ROLLED_BACK: 5 touched devices reverted to v2; 15 never exposed.",
+    lab: "HALTED → ROLLED_BACK", dy: 62, dx: 10 },
+]);
+
+// ---- event log ---------------------------------------------------------------
+const LOG = [
+  ["+0.000s", "CREATED", "rollout of v3 to 20 device(s) in 3 wave(s), failure budget 20%/wave, health window 2s", ""],
+  ["+0.000s", "WAVE_STARTED", "wave 0 (5%): 1 device(s) assigned v3, soaking 2s", ""],
+  ["+0.376s", "DEVICE_OK", "dev-00 applied v3 (1/1 ok)", "ok"],
+  ["+2.001s", "WAVE_PROMOTED", "wave 0 healthy for 2s (1 ok, 0 failed, 0 silent of 1) — promoting", "ok"],
+  ["+2.001s", "WAVE_STARTED", "wave 1 (25%): 4 device(s) assigned v3, soaking 2s", ""],
+  ["+2.130s", "DEVICE_OK", "dev-01 applied v3 (1/4 ok)", "ok"],
+  ["+2.144s", "DEVICE_OK", "dev-02 applied v3 (2/4 ok)", "ok"],
+  ["+2.182s", "DEVICE_FAIL", "dev-03 failed to apply v3: simulated apply failure: config rejected by device", "bad"],
+  ["+2.182s", "HALTED", "wave 1 failure rate 1/4 exceeds threshold 20%", "bad"],
+  ["+2.182s", "ROLLED_BACK", "5 touched device(s) reverted to v2; 15 device(s) never exposed", "bad"],
+];
+document.getElementById("lognode").innerHTML = LOG.map(([t, k, m, cls]) =>
+  `${t}  <span class="kind ${cls}">${k.padEnd(13)}</span> ${m}`).join("\n");
+
+// ---- tooltip layer -------------------------------------------------------------
+const tip = document.getElementById("tip");
+document.addEventListener("mousemove", (ev) => {
+  const t = ev.target.closest("[data-tip]");
+  if (!t) { tip.style.display = "none"; return; }
+  tip.textContent = t.dataset.tip;
+  tip.style.display = "block";
+  const pad = 14;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  const r = tip.getBoundingClientRect();
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+});
+</script>
