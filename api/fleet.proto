@@ -1,0 +1,203 @@
+syntax = "proto3";
+
+package fleet.v1;
+
+option go_package = "github.com/ericsson-kuma/fleet-ctl/api/fleetpb";
+
+// ---------------------------------------------------------------------------
+// Core domain types
+// ---------------------------------------------------------------------------
+
+// Health reflects the last-known operational state of a device.
+enum Health {
+  HEALTH_UNSPECIFIED = 0;
+  HEALTH_HEALTHY = 1;
+  HEALTH_DEGRADED = 2;
+  HEALTH_OFFLINE = 3;
+}
+
+// Config is a versioned, opaque configuration blob. The control plane never
+// interprets the blob; devices do. `version` is the identity used for rollout
+// bookkeeping and desired-state reconciliation.
+message Config {
+  string version = 1;
+  bytes blob = 2;
+  string description = 3;
+}
+
+// TargetSelector chooses which devices a rollout applies to. `all` targets the
+// whole fleet; otherwise a device must carry every label in match_labels.
+message TargetSelector {
+  bool all = 1;
+  map<string, string> match_labels = 2;
+}
+
+// Device is the control-plane's record of a single fleet member.
+message Device {
+  string id = 1;
+  map<string, string> labels = 2;
+  string model = 3;
+  Health health = 4;
+  // Version the device last reported as successfully applied ("running").
+  string applied_version = 5;
+  int64 last_seen_unix_ms = 6;
+}
+
+// ConfigApplyResult is a device's ack (or nack) after attempting to converge to
+// a desired config version. It is the signal the rollout guardrail acts on.
+message ConfigApplyResult {
+  string version = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------------------
+// DeviceService: the device-facing (data-plane) API.
+// ---------------------------------------------------------------------------
+service DeviceService {
+  // Register is an idempotent upsert of a device's identity/labels.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // TelemetryStream is a client-streaming heartbeat channel: a device sends a
+  // continuous stream of health/metric reports (and config apply acks). The
+  // server replies once when the stream closes.
+  rpc TelemetryStream(stream TelemetryReport) returns (TelemetryStreamSummary);
+
+  // GetAssignment is the pull half of desired-state reconciliation: a device
+  // polls for the config version the control plane wants it to run. Config is
+  // distributed by pull (like a kubelet / IoT device shadow), not pushed over
+  // the telemetry stream.
+  rpc GetAssignment(GetAssignmentRequest) returns (Assignment);
+}
+
+message RegisterRequest {
+  string id = 1;
+  map<string, string> labels = 2;
+  string model = 3;
+}
+
+message RegisterResponse {
+  // Desired config the device should converge to at registration time.
+  Config desired = 1;
+}
+
+message TelemetryReport {
+  string device_id = 1;
+  int64 timestamp_unix_ms = 2;
+  Health health = 3;
+  // Version the device is currently running.
+  string applied_version = 4;
+  // Optional: set when this report acks the outcome of a config apply attempt.
+  ConfigApplyResult apply_result = 5;
+  map<string, double> metrics = 6;
+}
+
+message TelemetryStreamSummary {
+  int32 reports_received = 1;
+}
+
+message GetAssignmentRequest {
+  string device_id = 1;
+}
+
+message Assignment {
+  Config desired = 1;
+}
+
+// ---------------------------------------------------------------------------
+// AdminService: the operator-facing (control-plane) API.
+// ---------------------------------------------------------------------------
+service AdminService {
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+
+  // CreateRollout begins a staged config rollout (canary -> full). Returns the
+  // rollout id; progress is observed via GetRollout / WatchRollout.
+  rpc CreateRollout(CreateRolloutRequest) returns (CreateRolloutResponse);
+
+  rpc GetRollout(GetRolloutRequest) returns (Rollout);
+
+  // WatchRollout is a server-streaming feed of rollout state-machine events:
+  // the event log is replayed, then live events stream until the rollout
+  // reaches a terminal state or the client disconnects.
+  rpc WatchRollout(WatchRolloutRequest) returns (stream RolloutEvent);
+}
+
+message ListDevicesRequest {}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message CreateRolloutRequest {
+  Config config = 1;
+  TargetSelector target = 2;
+  // Cumulative wave percentages, e.g. [5, 25, 100]. Each wave targets that
+  // percent of the selected fleet; the last wave must be 100.
+  repeated int32 wave_percents = 3;
+  // Fraction of a wave (0..1) allowed to fail before the guardrail halts and
+  // rolls back. A wave failure rate strictly greater than this halts.
+  double failure_threshold = 4;
+  // How long a wave must stay healthy before it is promoted to the next wave.
+  int64 health_window_ms = 5;
+}
+
+message CreateRolloutResponse {
+  string rollout_id = 1;
+}
+
+message GetRolloutRequest {
+  string rollout_id = 1;
+}
+
+message WatchRolloutRequest {
+  string rollout_id = 1;
+}
+
+enum RolloutState {
+  ROLLOUT_STATE_UNSPECIFIED = 0;
+  ROLLOUT_STATE_PENDING = 1;
+  ROLLOUT_STATE_IN_PROGRESS = 2;
+  ROLLOUT_STATE_SUCCEEDED = 3;
+  ROLLOUT_STATE_HALTED = 4;
+  ROLLOUT_STATE_ROLLED_BACK = 5;
+}
+
+enum WaveState {
+  WAVE_STATE_UNSPECIFIED = 0;
+  WAVE_STATE_PENDING = 1;
+  WAVE_STATE_RUNNING = 2;
+  WAVE_STATE_PROMOTED = 3;
+  WAVE_STATE_FAILED = 4;
+}
+
+message Wave {
+  int32 index = 1;
+  int32 percent = 2;
+  int32 target_count = 3;
+  int32 applied_ok = 4;
+  int32 applied_fail = 5;
+  WaveState state = 6;
+}
+
+message Rollout {
+  string id = 1;
+  Config config = 2;
+  TargetSelector target = 3;
+  RolloutState state = 4;
+  int32 current_wave = 5;
+  repeated Wave waves = 6;
+  // Version devices are reverted to if the guardrail rolls the rollout back.
+  string previous_version = 7;
+  repeated string target_device_ids = 8;
+}
+
+message RolloutEvent {
+  string rollout_id = 1;
+  int64 timestamp_unix_ms = 2;
+  // One of: CREATED, WAVE_STARTED, WAVE_PROMOTED, DEVICE_OK, DEVICE_FAIL,
+  // HALTED, ROLLED_BACK, SUCCEEDED.
+  string kind = 3;
+  string message = 4;
+  RolloutState state = 5;
+  int32 wave = 6;
+}
