@@ -68,6 +68,9 @@ type Store interface {
 
 	// SetDesired points devices at a config version (must exist in the catalog).
 	SetDesired(deviceIDs []string, version string) error
+	// ClearDesired removes explicit assignments, dropping devices back to the
+	// baseline (used to roll back a rollout that had no prior baseline).
+	ClearDesired(deviceIDs []string) error
 	// Desired resolves the config a device should run: its assignment if any,
 	// else the fleet baseline, else ok=false.
 	Desired(deviceID string) (Config, bool)

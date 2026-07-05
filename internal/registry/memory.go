@@ -119,6 +119,15 @@ func (s *InMemory) SetDesired(deviceIDs []string, version string) error {
 	return nil
 }
 
+func (s *InMemory) ClearDesired(deviceIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range deviceIDs {
+		delete(s.desired, id)
+	}
+	return nil
+}
+
 func (s *InMemory) Desired(deviceID string) (Config, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
