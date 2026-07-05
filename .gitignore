@@ -1,0 +1,14 @@
+# Build outputs
+/bin/
+
+# Test & profiling artifacts
+*.test
+*.out
+coverage.html
+
+# Demo runtime logs
+*.log
+
+# Editor / OS noise
+.DS_Store
+*.swp
